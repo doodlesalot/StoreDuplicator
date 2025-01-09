@@ -10,6 +10,7 @@ With this tool, you can sync/duplicate the following resources:
 - Blogs (along with their metafields)
 - Articles (mapped to a blog of the same handle. Comes along with their metafields)
 - Pages (along with their metafields)
+- Files
 
 ## Setting it all up
 You'll first need to [create 2 private apps](https://help.shopify.com/en/manual/apps/private-apps#generate-credentials-from-the-shopify-admin "Read Shopify's documentation on how to create a private app"). One needs read access on the source store, the other needs read/write on the destination store.
@@ -38,6 +39,8 @@ By default, simply running `yarn start` will validate that each store is able to
 - `--delete-articles` will override pre-existing articles.
 - `--metafields` copies over shop metafields
 - `--delete-metafields` will override pre-existing shop metafields.
+- `--files` copies over files
+- `--menus` copies over files
 - `--all` will sync everything.
 
 

@@ -1,5 +1,8 @@
 const Shopify = require('shopify-api-node');
 const fs = require('fs');
+const fetch = require('node-fetch');
+require('dotenv').config();
+
 class Migrator {
   constructor(sourceStore, destinationStore, verbosity = 4, saveData) {
     this.config = {
@@ -8,10 +11,46 @@ class Migrator {
     }
     this.saveData = !!saveData
     this.verbosity = verbosity
-    this.source = new Shopify(sourceStore);
-    this.destination = new Shopify(destinationStore);
+    this.source = new Shopify({
+      shopName: process.env.SOURCE_SHOPIFY_STORE,
+      accessToken: process.env.SOURCE_SHOPIFY_API_PASSWORD,
+      apiVersion: '2023-10'
+    });
+    this.destination = new Shopify({
+      shopName: process.env.DESTINATION_SHOPIFY_STORE,
+      accessToken: process.env.DESTINATION_SHOPIFY_API_PASSWORD,
+      apiVersion: '2023-10'
+    });
+
+    // Add GraphQL method to Shopify clients
+    this.source.graphql = async (query, variables = {}) => {
+      console.log(`Attempting to connect to: https://${process.env.SOURCE_SHOPIFY_STORE}/admin/api/2023-10/graphql.json`);
+      const response = await fetch(`https://${process.env.SOURCE_SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': process.env.SOURCE_SHOPIFY_API_PASSWORD,
+        },
+        body: JSON.stringify({ query, variables }),
+      });
+      return response.json();
+    };
+
+    this.destination.graphql = async (query, variables = {}) => {
+      console.log(`Attempting to connect to: https://${process.env.DESTINATION_SHOPIFY_STORE}/admin/api/2023-10/graphql.json`);
+      const response = await fetch(`https://${process.env.DESTINATION_SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': process.env.DESTINATION_SHOPIFY_API_PASSWORD,
+        },
+        body: JSON.stringify({ query, variables }),
+      });
+      return response.json();
+    };
+
     if (this.saveData) {
-      const types = ['products', 'pages', 'metafields', 'collections', 'articles', 'blogs']
+      const types = ['products', 'pages', 'metafields', 'collections', 'articles', 'blogs', 'files']
       types.forEach(type => {
         const dir = `data/${type}`
         if (fs.existsSync(dir)) {
@@ -25,66 +64,270 @@ class Migrator {
       })
     }
     this.requiredScopes = {
-      source: [ // For source, we only need read access, but won't discriminate against write access.
-        ['read_content', 'write_content'], // Blogs, Articles, Pages
-        ['read_products', 'write_products'], // Products, Variants, Collections
+      source: [
+        ['read_content', 'write_content'],
+        ['read_products', 'write_products'],
+        ['read_files', 'write_files'],
+        ['read_themes', 'write_themes'],
       ],
-      destination: [ // Destionation obviously requires write access
-        ['write_content'], // Blogs, Articles, Pages
-        ['write_products'], // Products, Variants, Collections
+      destination: [
+        ['write_content'],
+        ['write_products'],
+        ['write_files'],
+        ['write_themes'],
       ]
     };
   }
-  info() {
-    if (this.verbosity > 3) {
-      console.info.apply(this, arguments)
-    }
-  }
-  log() {
-    if (this.verbosity > 2) {
-      console.log.apply(this, arguments)
-    }
-  }
-  warn() {
-    if (this.verbosity > 1) {
-      console.warn.apply(this, arguments)
-    }
-  }
-  error() {
-    console.error.apply(this, arguments)
-  }
-  async testConnection() {
-    const sourceScopes = await this.source.accessScope.list()
-    // console.log('xx')
-    const destinationScopes = await this.destination.accessScope.list()
-    this.requiredScopes.source.forEach((scopes) => {
-      const scopeFound = !!sourceScopes.find(scope => scopes.indexOf(scope.handle) !== -1)
-      if (!scopeFound) {
-        const message = `Source store does not have proper access scope: ${scopes[0]}`
-        this.error(message)
-        throw new Error(message)
-      }
-    })
-    this.requiredScopes.destination.forEach((scopes) => {
-      const scopeFound = !!destinationScopes.find(scope => scopes.indexOf(scope.handle) !== -1)
-      if (!scopeFound) {
-        const message = `Destination store does not have proper access scope: ${scopes[0]}`
-        this.error(message)
-        throw new Error(message)
-      }
-    })
-  }
-  async asyncForEach(array, callback, concurrency = 1) {
-    const promises = [];
 
-    for (let index = 0; index < array.length; index++) {
-      promises.push(async () => await callback(array[index], index, array));
-    }
-    for (let i = 0; i < promises.length; i += concurrency) {
-      const chunk = promises.slice(i, i + concurrency);
-      await Promise.all(chunk.map(f => f()));
+  log(message) {
+    if (this.verbosity >= 4) {
+      console.log(message);
     }
   }
+
+  info(message) {
+    if (this.verbosity >= 3) {
+      console.info(message);
+    }
+  }
+
+  warn(message) {
+    if (this.verbosity >= 2) {
+      console.warn(message);
+    }
+  }
+
+  error(message) {
+    if (this.verbosity >= 1) {
+      console.error(message);
+    }
+  }
+
+  async asyncForEach(array, callback) {
+    for (let index = 0; index < array.length; index++) {
+      await callback(array[index], index, array);
+    }
+  }
+
+  async testConnection() {
+    const query = `
+      query {
+        shop {
+          name
+        }
+      }
+    `;
+
+    try {
+      const sourceResponse = await this.source.graphql(query);
+      if (sourceResponse.data && sourceResponse.data.shop) {
+        this.log(`Successfully connected to source store: ${sourceResponse.data.shop.name}`);
+      } else {
+        throw new Error('Could not connect to source store');
+      }
+
+      const destinationResponse = await this.destination.graphql(query);
+      if (destinationResponse.data && destinationResponse.data.shop) {
+        this.log(`Successfully connected to destination store: ${destinationResponse.data.shop.name}`);
+      } else {
+        throw new Error('Could not connect to destination store');
+      }
+
+    } catch (error) {
+      this.error('Could not validate proper store setup');
+      this.error(error.message);
+      throw error;
+    }
+  }
+
+  async migrateFiles(deleteFirst = false, skipExisting = true) {
+    this.log('File migration started...')
+    const destinationFiles = {}
+
+    // Fetch files from the destination store
+    let hasNextPage = true
+    let cursor = null
+    while (hasNextPage) {
+      const query = `
+        query {
+          files(first: 250${cursor ? `, after: "${cursor}"` : ''}) {
+            edges {
+              node {
+                id
+                createdAt
+                alt
+                ... on MediaImage {
+                  id
+                  image {
+                    originalSrc
+                  }
+                }
+                ... on GenericFile {
+                  id
+                  url
+                  fileStatus
+                }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      `
+      const response = await this.destination.graphql(query)
+      if (response.errors) {
+        this.error('GraphQL Error:', response.errors);
+        throw new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
+      }
+      if (!response.data || !response.data.files) {
+        this.error('Invalid GraphQL response:', response);
+        throw new Error('Invalid GraphQL response structure');
+      }
+      const files = response.data.files.edges.map(edge => edge.node)
+      files.forEach(file => {
+        const fileUrl = file.__typename === 'GenericFile' ? file.url : 
+                       file.__typename === 'MediaImage' && file.image ? file.image.originalSrc : null;
+        if (fileUrl) {
+          destinationFiles[fileUrl] = file;
+        }
+      })
+      hasNextPage = response.data.files.pageInfo.hasNextPage
+      cursor = response.data.files.pageInfo.endCursor
+    }
+
+    // Fetch and migrate files from the source store
+    hasNextPage = true
+    cursor = null
+    while (hasNextPage) {
+      const query = `
+        query {
+          files(first: 250${cursor ? `, after: "${cursor}"` : ''}) {
+            edges {
+              node {
+                id
+                createdAt
+                alt
+                __typename
+                ... on MediaImage {
+                  id
+                  image {
+                    originalSrc
+                  }
+                }
+                ... on GenericFile {
+                  id
+                  url
+                  fileStatus
+                }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      `
+      const response = await this.source.graphql(query)
+      if (response.errors) {
+        this.error('GraphQL Error:', response.errors);
+        throw new Error(`GraphQL errors: ${JSON.stringify(response.errors)}`);
+      }
+      if (!response.data || !response.data.files) {
+        this.error('Invalid GraphQL response:', response);
+        throw new Error('Invalid GraphQL response structure');
+      }
+      const files = response.data.files.edges.map(edge => edge.node)
+      await this.asyncForEach(files, async (file) => {
+        this.saveData && fs.writeFileSync(`data/files/${file.id}.json`, JSON.stringify(file))
+
+        const fileUrl = file.__typename === 'GenericFile' ? file.url :
+                       file.__typename === 'MediaImage' && file.image ? file.image.originalSrc : null;
+
+        if (!fileUrl) {
+          this.warn(`[FILE ${file.id}] Skipping file with no URL`);
+          this.warn(`File details: ${JSON.stringify(file, null, 2)}`);
+          return;
+        }
+
+        if (destinationFiles[fileUrl] && deleteFirst) {
+          this.log(`[DUPLICATE FILE] Deleting destination file ${fileUrl}`)
+          await this._deleteFile(destinationFiles[fileUrl].id)
+        }
+        if (destinationFiles[fileUrl] && skipExisting && !deleteFirst) {
+          this.log(`[EXISTING FILE] Skipping ${fileUrl}`)
+          return
+        }
+        await this._migrateFile(file)
+      })
+      hasNextPage = response.data.files.pageInfo.hasNextPage
+      cursor = response.data.files.pageInfo.endCursor
+    }
+
+    this.log('File migration finished!')
+  }
+
+  async _migrateFile(file) {
+    const fileUrl = file.__typename === 'GenericFile' ? file.url :
+                   file.__typename === 'MediaImage' && file.image ? file.image.originalSrc : null;
+
+    if (!fileUrl) {
+      throw new Error(`[FILE ${file.id}] No URL available for file`);
+    }
+
+    this.info(`[FILE ${file.id}] ${fileUrl} started...`)
+    const mutation = `
+      mutation fileCreate($files: [FileCreateInput!]!) {
+        fileCreate(files: $files) {
+          files {
+            id
+            createdAt
+            alt
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `
+    const variables = {
+      files: [{
+        originalSource: fileUrl,
+        alt: file.alt
+      }]
+    }
+    const response = await this.destination.graphql(mutation, variables)
+    if (response.data.fileCreate.userErrors.length > 0) {
+      throw new Error(`[FILE ${file.id}] Failed to create: ${response.data.fileCreate.userErrors[0].message}`)
+    } else {
+      this.info(`[FILE ${file.id}] duplicated. New id is ${response.data.fileCreate.files[0].id}.`)
+    }
+  }
+
+  async _deleteFile(fileId) {
+    const mutation = `
+      mutation fileDelete($fileId: ID!) {
+        fileDelete(id: $fileId) {
+          deletedFileId
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `
+    const variables = {
+      fileId: fileId
+    }
+    const response = await this.destination.graphql(mutation, variables)
+    if (response.data.fileDelete.userErrors.length > 0) {
+      this.error(`Failed to delete file ${fileId}: ${response.data.fileDelete.userErrors[0].message}`)
+    }
+  }
+
   async _getMetafields(resource = null, id = null) {
     let params = { limit: 250 }
     if (resource && id) {
@@ -526,6 +769,134 @@ class Migrator {
       } while (params !== undefined);
     })
   }
+  async migrateMenus(deleteFirst = false, skipExisting = true) {
+    this.log('Menu migration started...')
+    const destinationMenus = {}
+
+    // Fetch menus from the destination store
+    const destinationQuery = `
+      query {
+        menus(first: 250) {
+          edges {
+            node {
+              id
+              handle
+              title
+              items {
+                id
+                title
+                url
+                type
+              }
+            }
+          }
+        }
+      }
+    `
+    const destinationResponse = await this.destination.graphql(destinationQuery)
+    if (destinationResponse.data && destinationResponse.data.menus) {
+      destinationResponse.data.menus.edges.forEach(edge => {
+        destinationMenus[edge.node.handle] = edge.node
+      })
+    }
+
+    // Fetch and migrate menus from the source store
+    const sourceQuery = `
+      query {
+        menus(first: 250) {
+          edges {
+            node {
+              id
+              handle
+              title
+              items {
+                id
+                title
+                url
+                type
+              }
+            }
+          }
+        }
+      }
+    `
+    const sourceResponse = await this.source.graphql(sourceQuery)
+    if (sourceResponse.data && sourceResponse.data.menus) {
+      await this.asyncForEach(sourceResponse.data.menus.edges, async (edge) => {
+        const menu = edge.node
+        this.saveData && fs.writeFileSync(`data/menus/${menu.id}.json`, JSON.stringify(menu))
+
+        if (destinationMenus[menu.handle] && deleteFirst) {
+          this.log(`[DUPLICATE MENU] Deleting destination menu ${menu.handle}`)
+          await this._deleteMenu(destinationMenus[menu.handle].id)
+        }
+        if (destinationMenus[menu.handle] && skipExisting && !deleteFirst) {
+          this.log(`[EXISTING MENU] Skipping ${menu.handle}`)
+          return
+        }
+        await this._migrateMenu(menu)
+      })
+    }
+
+    this.log('Menu migration finished!')
+  }
+
+  async _migrateMenu(menu) {
+    this.info(`[MENU ${menu.id}] ${menu.handle} started...`)
+    const mutation = `
+      mutation menuCreate($input: MenuInput!) {
+        menuCreate(input: $input) {
+          menu {
+            id
+            handle
+            title
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `
+    const variables = {
+      input: {
+        handle: menu.handle,
+        title: menu.title,
+        items: menu.items.map(item => ({
+          title: item.title,
+          url: item.url,
+          type: item.type
+        }))
+      }
+    }
+    const response = await this.destination.graphql(mutation, variables)
+    if (response.data.menuCreate.userErrors.length > 0) {
+      throw new Error(`[MENU ${menu.id}] Failed to create: ${response.data.menuCreate.userErrors[0].message}`)
+    } else {
+      this.info(`[MENU ${menu.id}] duplicated. New id is ${response.data.menuCreate.menu.id}.`)
+    }
+  }
+
+  async _deleteMenu(menuId) {
+    const mutation = `
+      mutation menuDelete($id: ID!) {
+        menuDelete(id: $id) {
+          deletedMenuId
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `
+    const variables = {
+      id: menuId
+    }
+    const response = await this.destination.graphql(mutation, variables)
+    if (response.data.menuDelete.userErrors.length > 0) {
+      this.error(`Failed to delete menu ${menuId}: ${response.data.menuDelete.userErrors[0].message}`)
+    }
+  }
 }
 
-module.exports = Migrator
+module.exports = Migrator;
